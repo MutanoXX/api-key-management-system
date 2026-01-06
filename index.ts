@@ -4,6 +4,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 
+// Importar logger colorido
+import { logger } from './logger.js';
+
 // Importar módulo de banco de dados JSON
 import * as db from './database/db.js';
 
@@ -12,7 +15,8 @@ const __dirname = path.dirname(__filename);
 
 // Initialize Express app
 const app = express();
-const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
+const PORT = process.env.PORT || 8080;
 
 // Middleware
 app.use(cors({

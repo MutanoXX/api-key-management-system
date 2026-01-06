@@ -10,6 +10,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 
+// Importar logger colorido
+import { logger } from './logger.js';
+
 // Importar módulo de banco de dados JSON
 import * as db from './database/db.js';
 
@@ -18,7 +21,8 @@ const __dirname = path.dirname(__filename);
 
 // Initialize Express app
 const app = express();
-const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
+const PORT = process.env.PORT || 8080;
 
 // Middleware
 app.use(cors({
@@ -31,11 +35,26 @@ app.use(express.json({ limit: '10mb' }));
 
 // Security headers middleware
 app.use((req, res, next) => {
+  logger.security('Headers Applied', `${req.method} ${req.path}`);
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' cdnjs.cloudflare.com fonts.googleapis.com; font-src 'self' fonts.gstatic.com cdnjs.cloudflare.com; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none';");
+  next();
+});
+
+// Request logging middleware
+app.use((req, res, next) => {
+  const startTime = Date.now();
+  logger.request(req);
+
+  // Log response when finished
+  res.on('finish', () => {
+    const duration = Date.now() - startTime;
+    logger.response(res, duration);
+  });
+
   next();
 });
 
@@ -109,6 +128,7 @@ function checkRateLimit(identifier, maxRequests, windowMs) {
 // Audit logging
 async function createAuditLog(apiKeyUid, action, details, ipAddress, userAgent) {
   try {
+    logger.db('Audit Log', `Action: ${action}, API Key: ${apiKeyUid}`);
     await db.createAuditLog({
       apiKeyUid,
       action,
@@ -117,7 +137,7 @@ async function createAuditLog(apiKeyUid, action, details, ipAddress, userAgent) 
       userAgent,
     });
   } catch (error) {
-    console.error('[Audit Log] Error:', error);
+    logger.error('Audit Log', 'Failed to create audit log', error.message);
   }
 }
 
@@ -968,23 +988,62 @@ app.get('/api/health', (req, res) => {
 // START SERVER
 // ==========================================
 
-app.listen(PORT, () => {
-  console.log(`\n🚀 API Key Management System`);
-  console.log(`📍 Server running on http://localhost:${PORT}`);
-  console.log(`📊 Dashboard: http://localhost:${PORT}/api/dashboard/apikeys`);
-  console.log(`🔑 Admin API Key: MutanoX3397`);
-  console.log(`📁 Database: JSON files in ./database`);
-  console.log(`📦 Module Type: ES Module (for DISCLOUD)`);
-  console.log(`\nPress Ctrl+C to stop\n`);
+// Display startup banner
+logger.banner(
+  'API KEY MANAGEMENT SYSTEM',
+  'Complete System with Dashboard',
+  '1.0.0'
+);
+
+// Server configuration info
+logger.section('📡 Server Configuration');
+logger.table(
+  ['Setting', 'Value'],
+  [
+    { Setting: 'Host', Value: HOST },
+    { Setting: 'Port', Value: PORT },
+    { Setting: 'URL', Value: `http://${HOST}:${PORT}` },
+    { Setting: 'Dashboard', Value: `/api/dashboard/apikeys` },
+    { Setting: 'Admin Key', Value: 'MutanoX3397' },
+    { Setting: 'Database', Value: 'JSON files' },
+    { Setting: 'Module', Value: 'ES Module' },
+  ]
+);
+
+// Start listening
+app.listen(PORT, HOST, () => {
+  logger.success('SERVER', `Server started successfully on ${HOST}:${PORT}`);
+  logger.section('🌐 Available Endpoints');
+  logger.list([
+    `GET  /api/health - Health check`,
+    `POST /api/admin/auth/validate - Admin authentication`,
+    `GET  /api/admin/auth/refresh - Refresh token`,
+    `GET  /api/dashboard/apikeys - Dashboard UI`,
+    `GET  /api/admin/keys - List all API keys`,
+    `POST /api/admin/keys - Create new API key`,
+    `GET  /api/admin/stats - System statistics`,
+    `POST /api/cron/maintenance - Maintenance task`,
+  ], '    ');
+  console.log('');
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
+const gracefulShutdown = (signal) => {
+  logger.warning('SERVER', `${signal} signal received: shutting down gracefully`);
+  logger.info('SERVER', 'Closing HTTP connections...');
   process.exit(0);
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught errors
+process.on('uncaughtException', (error) => {
+  logger.error('SERVER', 'Uncaught Exception', error.stack);
+  process.exit(1);
 });
 
-process.on('SIGINT', () => {
-  console.log('SIGINT signal received: closing HTTP server');
-  process.exit(0);
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('SERVER', 'Unhandled Rejection at Promise', reason);
+  process.exit(1);
 });
