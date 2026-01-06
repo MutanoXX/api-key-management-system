@@ -1,15 +1,14 @@
-import { PrismaClient } from '@prisma/client';
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 
+// Importar módulo de banco de dados JSON
+import * as db from './database/db.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Initialize Prisma Client
-const prisma = new PrismaClient();
 
 // Initialize Express app
 const app = express();
@@ -34,34 +33,31 @@ app.use((req, res, next) => {
   next();
 });
 
-// Serve static files (dashboard)
-app.use('/dashboard', express.static(path.join(__dirname, 'dashboard.html')));
-
 // ==========================================
-// UTILITY FUNCTIONS
+// JWT FUNCTIONS
 // ==========================================
 
-function generateToken(payload) {
-  const jwt = require('jsonwebtoken');
-  const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
+import jwt from 'jsonwebtoken';
+
+function generateToken(payload, expiresIn = '1h') {
+  return jwt.sign(payload, db.JWT_SECRET, { expiresIn });
 }
 
 function generateRefreshToken(payload) {
-  const jwt = require('jsonwebtoken');
-  const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign(payload, db.JWT_SECRET, { expiresIn: '7d' });
 }
 
 function verifyToken(token) {
-  const jwt = require('jsonwebtoken');
-  const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
   try {
-    return jwt.verify(token, JWT_SECRET);
+    return jwt.verify(token, db.JWT_SECRET);
   } catch (error) {
     return null;
   }
 }
+
+// ==========================================
+// UTILITY FUNCTIONS
+// ==========================================
 
 function isSubscriptionExpired(endDate) {
   return new Date() > new Date(endDate);
@@ -105,20 +101,45 @@ function checkRateLimit(identifier, maxRequests, windowMs) {
 }
 
 // Audit logging
-async function createAuditLog(apiKeyId, action, details, ipAddress, userAgent) {
+async function createAuditLog(apiKeyUid, action, details, ipAddress, userAgent) {
   try {
-    await prisma.auditLog.create({
-      data: {
-        apiKeyId,
-        action,
-        details: JSON.stringify(details),
-        ipAddress,
-        userAgent,
-      },
+    await db.createAuditLog({
+      apiKeyUid,
+      action,
+      details: JSON.stringify(details),
+      ipAddress,
+      userAgent,
     });
   } catch (error) {
     console.error('[Audit Log] Error:', error);
   }
+}
+
+// ==========================================
+// AUTHENTICATION MIDDLEWARE
+// ==========================================
+
+async function authenticateAdmin(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Token required', code: 'MISSING_TOKEN' });
+  }
+
+  const token = authHeader.substring(7);
+
+  // Verificar se está na blacklist
+  const isBlacklisted = await db.isTokenBlacklisted(token);
+  if (isBlacklisted) {
+    return res.status(401).json({ error: 'Token is blacklisted', code: 'BLACKLISTED_TOKEN' });
+  }
+
+  const decoded = verifyToken(token);
+  if (!decoded || decoded.type !== 'admin') {
+    return res.status(401).json({ error: 'Invalid or expired token', code: 'INVALID_TOKEN' });
+  }
+
+  req.admin = decoded;
+  next();
 }
 
 // ==========================================
@@ -133,10 +154,7 @@ app.post('/api/admin/auth/validate', async (req, res) => {
       return res.status(400).json({ error: 'API key is required', code: 'MISSING_API_KEY' });
     }
 
-    const keyRecord = await prisma.apiKey.findUnique({
-      where: { keyValue: apiKey },
-      include: { subscription: true },
-    });
+    const keyRecord = await db.findApiKeyByKeyValue(apiKey);
 
     if (!keyRecord) {
       return res.status(401).json({ error: 'Invalid API key', code: 'INVALID_API_KEY' });
@@ -150,31 +168,26 @@ app.post('/api/admin/auth/validate', async (req, res) => {
       return res.status(403).json({ error: 'Admin API key required', code: 'NOT_ADMIN_KEY' });
     }
 
-    if (keyRecord.subscription && keyRecord.subscription.enabled) {
-      if (isSubscriptionExpired(keyRecord.subscription.endDate)) {
-        await prisma.subscription.update({
-          where: { id: keyRecord.subscription.id },
-          data: { status: 'expired' },
-        });
+    const subscription = await db.findSubscriptionByApiKeyUid(keyRecord.uid);
+    if (subscription && subscription.enabled) {
+      if (isSubscriptionExpired(subscription.endDate)) {
+        await db.updateSubscription(keyRecord.uid, { status: 'expired' });
         return res.status(403).json({ error: 'Subscription expired', code: 'SUBSCRIPTION_EXPIRED' });
       }
     }
 
-    const token = generateToken({ apiKeyId: keyRecord.id, apiKeyUid: keyRecord.uid, type: 'admin' });
-    const refreshToken = generateRefreshToken({ apiKeyId: keyRecord.id, apiKeyUid: keyRecord.uid, type: 'refresh' });
+    const token = generateToken({ apiKeyUid: keyRecord.uid, type: 'admin' });
+    const refreshToken = generateRefreshToken({ apiKeyUid: keyRecord.uid, type: 'refresh' });
 
     await createAuditLog(
-      keyRecord.id,
+      keyRecord.uid,
       'admin_login',
       {},
       req.ip,
       req.headers['user-agent']
     );
 
-    await prisma.apiKey.update({
-      where: { id: keyRecord.id },
-      data: { lastUsedAt: new Date(), usageCount: { increment: 1 } },
-    });
+    await db.incrementApiKeyUsage(keyRecord.uid);
 
     res.json({
       valid: true,
@@ -189,52 +202,114 @@ app.post('/api/admin/auth/validate', async (req, res) => {
   }
 });
 
+app.get('/api/admin/auth/refresh', async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Refresh token is required', code: 'MISSING_REFRESH_TOKEN' });
+    }
+
+    const token = authHeader.substring(7);
+    const isBlacklisted = await db.isTokenBlacklisted(token);
+    if (isBlacklisted) {
+      return res.status(401).json({ error: 'Refresh token is blacklisted', code: 'BLACKLISTED_TOKEN' });
+    }
+
+    const decoded = verifyToken(token);
+    if (!decoded || decoded.type !== 'refresh') {
+      return res.status(401).json({ error: 'Invalid refresh token', code: 'INVALID_REFRESH_TOKEN' });
+    }
+
+    const apiKey = await db.findApiKeyByUid(decoded.apiKeyUid);
+    if (!apiKey || !apiKey.isActive || apiKey.type !== 'admin') {
+      return res.status(403).json({ error: 'Invalid admin credentials', code: 'INVALID_ADMIN' });
+    }
+
+    const subscription = await db.findSubscriptionByApiKeyUid(apiKey.uid);
+    if (subscription && subscription.enabled) {
+      if (isSubscriptionExpired(subscription.endDate)) {
+        return res.status(403).json({ error: 'Subscription expired', code: 'SUBSCRIPTION_EXPIRED' });
+      }
+    }
+
+    const newToken = generateToken({ apiKeyUid: apiKey.uid, type: 'admin' });
+    const newRefreshToken = generateRefreshToken({ apiKeyUid: apiKey.uid, type: 'refresh' });
+
+    await db.addToJwtBlacklist(token, 7 * 24 * 60 * 60);
+
+    res.json({
+      valid: true,
+      token: newToken,
+      refreshToken: newRefreshToken,
+      expiresIn: 3600,
+    });
+  } catch (error) {
+    console.error('[Auth] Refresh error:', error);
+    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.delete('/api/admin/auth/logout', async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Token is required', code: 'MISSING_TOKEN' });
+    }
+
+    const token = authHeader.substring(7);
+    const decoded = verifyToken(token);
+    if (decoded) {
+      await db.addToJwtBlacklist(token, 3600);
+    }
+
+    res.json({ success: true, message: 'Logged out successfully' });
+  } catch (error) {
+    console.error('[Auth] Logout error:', error);
+    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+  }
+});
+
 // ==========================================
 // API KEYS ENDPOINTS
 // ==========================================
 
-app.get('/api/admin/keys', async (req, res) => {
+app.get('/api/admin/keys', authenticateAdmin, async (req, res) => {
   try {
-    const authHeader = req.headers['authorization'];
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Token required', code: 'MISSING_TOKEN' });
-    }
+    const apiKeys = await db.findAllApiKeys();
+    const subscriptions = await db.findAllSubscriptions();
 
-    const decoded = verifyToken(authHeader.substring(7));
-    if (!decoded || decoded.type !== 'admin') {
-      return res.status(401).json({ error: 'Invalid token', code: 'INVALID_TOKEN' });
-    }
-
-    const apiKeys = await prisma.apiKey.findMany({
-      include: { subscription: true },
-      orderBy: { createdAt: 'desc' },
-    });
+    const keysWithSubscriptions = await Promise.all(
+      apiKeys.map(async (key) => {
+        const subscription = subscriptions.find(s => s.apiKeyUid === key.uid);
+        return {
+          id: key.id,
+          uid: key.uid,
+          keyValue: key.keyValue,
+          name: key.name,
+          type: key.type,
+          isActive: key.isActive,
+          createdAt: key.createdAt,
+          lastUsedAt: key.lastUsedAt,
+          usageCount: key.usageCount,
+          subscription: subscription
+            ? {
+                id: subscription.id,
+                enabled: subscription.enabled,
+                price: subscription.price,
+                currency: subscription.currency,
+                status: subscription.status,
+                startDate: subscription.startDate,
+                endDate: subscription.endDate,
+                daysRemaining: calculateDaysRemaining(subscription.endDate),
+              }
+            : null,
+        };
+      })
+    );
 
     res.json({
       success: true,
-      apiKeys: apiKeys.map((key) => ({
-        id: key.id,
-        uid: key.uid,
-        keyValue: key.keyValue,
-        name: key.name,
-        type: key.type,
-        isActive: key.isActive,
-        createdAt: key.createdAt,
-        lastUsedAt: key.lastUsedAt,
-        usageCount: key.usageCount,
-        subscription: key.subscription
-          ? {
-              id: key.subscription.id,
-              enabled: key.subscription.enabled,
-              price: key.subscription.price,
-              currency: key.subscription.currency,
-              status: key.subscription.status,
-              startDate: key.subscription.startDate,
-              endDate: key.subscription.endDate,
-              daysRemaining: calculateDaysRemaining(key.subscription.endDate),
-            }
-          : null,
-      })),
+      apiKeys: keysWithSubscriptions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
     });
   } catch (error) {
     console.error('[Keys] Error:', error);
@@ -242,68 +317,84 @@ app.get('/api/admin/keys', async (req, res) => {
   }
 });
 
-app.post('/api/admin/keys', async (req, res) => {
+app.get('/api/admin/keys/:uid', authenticateAdmin, async (req, res) => {
   try {
-    const authHeader = req.headers['authorization'];
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Token required', code: 'MISSING_TOKEN' });
+    const { uid } = req.params;
+    const apiKey = await db.findApiKeyByUid(uid);
+
+    if (!apiKey) {
+      return res.status(404).json({ error: 'API key not found', code: 'API_KEY_NOT_FOUND' });
     }
 
-    const decoded = verifyToken(authHeader.substring(7));
-    if (!decoded || decoded.type !== 'admin') {
-      return res.status(401).json({ error: 'Invalid token', code: 'INVALID_TOKEN' });
-    }
+    const subscription = await db.findSubscriptionByApiKeyUid(uid);
+    const usageLogs = await db.findUsageLogsByApiKeyUid(uid, 50);
+    const auditLogs = await db.findRecentAuditLogs(10);
+    const filteredAuditLogs = auditLogs.filter(log => log.apiKeyUid === uid);
 
+    res.json({
+      success: true,
+      apiKey: {
+        ...apiKey,
+        subscription,
+        usageLogs,
+        auditLogs: filteredAuditLogs,
+      },
+    });
+  } catch (error) {
+    console.error('[Keys] Get error:', error);
+    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post('/api/admin/keys', authenticateAdmin, async (req, res) => {
+  try {
     const { name, type = 'normal', subscription } = req.body;
 
     if (!name) {
       return res.status(400).json({ error: 'Name is required', code: 'MISSING_NAME' });
     }
 
-    const uid = crypto.randomUUID();
+    // Generate API key
     const keyValue = `${name.replace(/\s+/g, '')}-${Math.random().toString(36).substring(2, 10)}`;
 
-    const newKey = await prisma.apiKey.create({
-      data: {
-        uid,
-        keyValue,
-        name,
-        type,
-      },
+    const newKey = await db.createApiKey({
+      keyValue,
+      name,
+      type,
     });
 
     if (subscription && subscription.enabled) {
-      const startDate = new Date();
-      const endDate = new Date(startDate);
+      const startDate = new Date().toISOString();
+      const endDate = new Date();
       endDate.setDate(endDate.getDate() + (subscription.durationDays || 30));
 
-      await prisma.subscription.create({
-        data: {
-          apiKeyId: newKey.id,
-          enabled: true,
-          price: subscription.price || 50,
-          currency: subscription.currency || 'BRL',
-          status: 'active',
-          startDate,
-          endDate,
-          autoRenew: subscription.autoRenew || false,
-        },
+      await db.createSubscription({
+        apiKeyUid: newKey.uid,
+        enabled: true,
+        price: subscription.price || 50,
+        currency: subscription.currency || 'BRL',
+        status: 'active',
+        startDate,
+        endDate: endDate.toISOString(),
+        autoRenew: subscription.autoRenew || false,
       });
 
-      await prisma.paymentHistory.create({
-        data: {
-          subscriptionId: newKey.id,
+      const createdSubscription = await db.findSubscriptionByApiKeyUid(newKey.uid);
+      if (createdSubscription) {
+        await db.createPayment({
+          subscriptionId: createdSubscription.id,
+          apiKeyUid: newKey.uid,
           amount: subscription.price || 50,
           currency: subscription.currency || 'BRL',
-          paymentDate: new Date(),
+          paymentDate: new Date().toISOString(),
           reference: `SUB-${Date.now()}`,
           method: 'manual',
           status: 'completed',
-        },
-      });
+        });
+      }
     }
 
-    await createAuditLog(newKey.id, 'create_api_key', { name, type }, req.ip, req.headers['user-agent']);
+    await createAuditLog(newKey.uid, 'create_api_key', { name, type }, req.ip, req.headers['user-agent']);
 
     res.status(201).json({
       success: true,
@@ -320,21 +411,53 @@ app.post('/api/admin/keys', async (req, res) => {
   }
 });
 
-app.delete('/api/admin/keys/:uid', async (req, res) => {
+app.put('/api/admin/keys/:uid', authenticateAdmin, async (req, res) => {
   try {
-    const authHeader = req.headers['authorization'];
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Token required', code: 'MISSING_TOKEN' });
+    const { uid } = req.params;
+    const { name, isActive, rateLimit, rateLimitWindow } = req.body;
+
+    const existingKey = await db.findApiKeyByUid(uid);
+    if (!existingKey) {
+      return res.status(404).json({ error: 'API key not found', code: 'API_KEY_NOT_FOUND' });
     }
 
-    const decoded = verifyToken(authHeader.substring(7));
-    if (!decoded || decoded.type !== 'admin') {
-      return res.status(401).json({ error: 'Invalid token', code: 'INVALID_TOKEN' });
-    }
+    const updates = {};
+    if (name !== undefined) updates.name = name;
+    if (isActive !== undefined) updates.isActive = isActive;
+    if (rateLimit !== undefined) updates.rateLimit = rateLimit;
+    if (rateLimitWindow !== undefined) updates.rateLimitWindow = rateLimitWindow;
 
+    const updatedKey = await db.updateApiKey(uid, updates);
+
+    await createAuditLog(
+      uid,
+      'update_api_key',
+      { updates },
+      req.ip,
+      req.headers['user-agent']
+    );
+
+    res.json({
+      success: true,
+      apiKey: {
+        id: updatedKey.id,
+        uid: updatedKey.uid,
+        name: updatedKey.name,
+        type: updatedKey.type,
+        isActive: updatedKey.isActive,
+      },
+    });
+  } catch (error) {
+    console.error('[Keys] Update error:', error);
+    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.delete('/api/admin/keys/:uid', authenticateAdmin, async (req, res) => {
+  try {
     const { uid } = req.params;
 
-    await prisma.apiKey.delete({ where: { uid } });
+    await db.deleteApiKey(uid);
 
     res.json({ success: true, message: 'API key deleted' });
   } catch (error) {
@@ -347,84 +470,65 @@ app.delete('/api/admin/keys/:uid', async (req, res) => {
 // SUBSCRIPTION ENDPOINTS
 // ==========================================
 
-app.post('/api/admin/keys/:uid/subscription/activate', async (req, res) => {
+app.post('/api/admin/keys/:uid/subscription/activate', authenticateAdmin, async (req, res) => {
   try {
-    const authHeader = req.headers['authorization'];
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Token required', code: 'MISSING_TOKEN' });
-    }
-
-    const decoded = verifyToken(authHeader.substring(7));
-    if (!decoded || decoded.type !== 'admin') {
-      return res.status(401).json({ error: 'Invalid token', code: 'INVALID_TOKEN' });
-    }
-
     const { uid } = req.params;
     const { price, durationDays = 30, autoRenew = false } = req.body;
 
-    const apiKey = await prisma.apiKey.findUnique({ where: { uid } });
-
+    const apiKey = await db.findApiKeyByUid(uid);
     if (!apiKey) {
       return res.status(404).json({ error: 'API key not found', code: 'API_KEY_NOT_FOUND' });
     }
 
-    const existingSubscription = await prisma.subscription.findUnique({
-      where: { apiKeyId: apiKey.id },
-    });
+    const existingSubscription = await db.findSubscriptionByApiKeyUid(uid);
 
     if (existingSubscription && existingSubscription.enabled) {
       return res.status(400).json({ error: 'Subscription already exists', code: 'SUBSCRIPTION_EXISTS' });
     }
 
-    const startDate = new Date();
-    const endDate = new Date(startDate);
+    const startDate = new Date().toISOString();
+    const endDate = new Date();
     endDate.setDate(endDate.getDate() + durationDays);
 
     let subscription;
     if (existingSubscription) {
-      subscription = await prisma.subscription.update({
-        where: { apiKeyId: apiKey.id },
-        data: {
-          enabled: true,
-          price,
-          currency: 'BRL',
-          status: 'active',
-          startDate,
-          endDate,
-          autoRenew,
-        },
+      subscription = await db.updateSubscription(uid, {
+        enabled: true,
+        price,
+        currency: 'BRL',
+        status: 'active',
+        startDate,
+        endDate: endDate.toISOString(),
+        autoRenew,
       });
     } else {
-      subscription = await prisma.subscription.create({
-        data: {
-          apiKeyId: apiKey.id,
-          enabled: true,
-          price,
-          currency: 'BRL',
-          status: 'active',
-          startDate,
-          endDate,
-          autoRenew,
-        },
+      subscription = await db.createSubscription({
+        apiKeyUid: uid,
+        enabled: true,
+        price,
+        currency: 'BRL',
+        status: 'active',
+        startDate,
+        endDate: endDate.toISOString(),
+        autoRenew,
       });
     }
 
-    await prisma.paymentHistory.create({
-      data: {
-        subscriptionId: subscription.id,
-        amount: price,
-        currency: 'BRL',
-        paymentDate: new Date(),
-        reference: `SUB-${Date.now()}`,
-        method: 'manual',
-        status: 'completed',
-      },
+    await db.createPayment({
+      subscriptionId: subscription.id,
+      apiKeyUid: uid,
+      amount: price,
+      currency: 'BRL',
+      paymentDate: new Date().toISOString(),
+      reference: `SUB-${Date.now()}`,
+      method: 'manual',
+      status: 'completed',
     });
 
     await createAuditLog(
-      apiKey.id,
+      uid,
       'activate_subscription',
-      { price, durationDays },
+      { price, durationDays, autoRenew },
       req.ip,
       req.headers['user-agent']
     );
@@ -447,67 +551,53 @@ app.post('/api/admin/keys/:uid/subscription/activate', async (req, res) => {
   }
 });
 
-app.post('/api/admin/keys/:uid/subscription/renew', async (req, res) => {
+app.post('/api/admin/keys/:uid/subscription/renew', authenticateAdmin, async (req, res) => {
   try {
-    const authHeader = req.headers['authorization'];
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Token required', code: 'MISSING_TOKEN' });
-    }
-
-    const decoded = verifyToken(authHeader.substring(7));
-    if (!decoded || decoded.type !== 'admin') {
-      return res.status(401).json({ error: 'Invalid token', code: 'INVALID_TOKEN' });
-    }
-
     const { uid } = req.params;
     const { durationDays = 30, paymentReference, amount } = req.body;
 
-    const apiKey = await prisma.apiKey.findUnique({
-      where: { uid },
-      include: { subscription: true },
-    });
+    const apiKey = await db.findApiKeyByUid(uid);
+    if (!apiKey) {
+      return res.status(404).json({ error: 'API key not found', code: 'API_KEY_NOT_FOUND' });
+    }
 
-    if (!apiKey || !apiKey.subscription) {
+    const subscription = await db.findSubscriptionByApiKeyUid(uid);
+    if (!subscription) {
       return res.status(404).json({ error: 'Subscription not found', code: 'SUBSCRIPTION_NOT_FOUND' });
     }
 
-    let newEndDate = new Date(apiKey.subscription.endDate);
-    if (isSubscriptionExpired(apiKey.subscription.endDate)) {
-      newEndDate = new Date();
+    let currentEndDate = new Date(subscription.endDate);
+    if (isSubscriptionExpired(subscription.endDate)) {
+      currentEndDate = new Date();
     }
+    
+    const newEndDate = new Date(currentEndDate);
     newEndDate.setDate(newEndDate.getDate() + durationDays);
 
-    const updatedSubscription = await prisma.subscription.update({
-      where: { id: apiKey.subscription.id },
-      data: {
-        endDate: newEndDate,
-        status: 'active',
-      },
+    const updatedSubscription = await db.updateSubscription(uid, {
+      endDate: newEndDate.toISOString(),
+      status: 'active',
     });
 
-    await prisma.paymentHistory.create({
-      data: {
-        subscriptionId: updatedSubscription.id,
-        amount: amount || apiKey.subscription.price,
-        currency: 'BRL',
-        paymentDate: new Date(),
-        reference: paymentReference || `RENEW-${Date.now()}`,
-        method: 'manual',
-        status: 'completed',
-      },
+    await db.createPayment({
+      subscriptionId: subscription.id,
+      apiKeyUid: uid,
+      amount: amount || subscription.price,
+      currency: subscription.currency || 'BRL',
+      paymentDate: new Date().toISOString(),
+      reference: paymentReference || `RENEW-${Date.now()}`,
+      method: 'manual',
+      status: 'completed',
     });
 
     if (!apiKey.isActive) {
-      await prisma.apiKey.update({
-        where: { id: apiKey.id },
-        data: { isActive: true },
-      });
+      await db.updateApiKey(uid, { isActive: true });
     }
 
     await createAuditLog(
-      apiKey.id,
+      uid,
       'renew_subscription',
-      { durationDays, newEndDate },
+      { durationDays, newEndDate: newEndDate.toISOString() },
       req.ip,
       req.headers['user-agent']
     );
@@ -518,9 +608,197 @@ app.post('/api/admin/keys/:uid/subscription/renew', async (req, res) => {
         endDate: updatedSubscription.endDate,
         daysRemaining: calculateDaysRemaining(updatedSubscription.endDate),
       },
+      message: 'Subscription renewed successfully',
     });
   } catch (error) {
     console.error('[Subscription] Renew error:', error);
+    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post('/api/admin/keys/:uid/subscription/cancel', authenticateAdmin, async (req, res) => {
+  try {
+    const { uid } = req.params;
+
+    const subscription = await db.findSubscriptionByApiKeyUid(uid);
+    if (!subscription) {
+      return res.status(404).json({ error: 'Subscription not found', code: 'SUBSCRIPTION_NOT_FOUND' });
+    }
+
+    if (!subscription.enabled) {
+      return res.status(400).json({ error: 'Subscription is not active', code: 'SUBSCRIPTION_NOT_ACTIVE' });
+    }
+
+    await db.updateSubscription(uid, {
+      autoRenew: false,
+      status: 'cancelled',
+    });
+
+    await createAuditLog(
+      uid,
+      'cancel_subscription',
+      { endDate: subscription.endDate },
+      req.ip,
+      req.headers['user-agent']
+    );
+
+    res.json({
+      success: true,
+      subscription: {
+        id: subscription.id,
+        enabled: subscription.enabled,
+        status: 'cancelled',
+        endDate: subscription.endDate,
+      },
+      message: 'Subscription cancelled successfully',
+      note: 'The subscription will expire naturally at end date',
+    });
+  } catch (error) {
+    console.error('[Subscription] Cancel error:', error);
+    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+  }
+});
+
+// ==========================================
+// SUBSCRIPTIONS LIST ENDPOINT
+// ==========================================
+
+app.get('/api/admin/subscriptions/expiring', authenticateAdmin, async (req, res) => {
+  try {
+    const days = parseInt(req.query.days || '7');
+    const status = req.query.status || 'all';
+
+    const subscriptions = await db.findAllSubscriptions();
+    const now = new Date();
+    const thresholdDate = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+
+    let filteredSubscriptions = subscriptions;
+
+    if (status === 'expiring') {
+      filteredSubscriptions = subscriptions.filter(
+        s => !isSubscriptionExpired(s.endDate) && new Date(s.endDate) <= thresholdDate
+      );
+    } else if (status === 'expired') {
+      filteredSubscriptions = subscriptions.filter(s => isSubscriptionExpired(s.endDate));
+    }
+
+    const resultSubscriptions = [];
+    for (const sub of filteredSubscriptions) {
+      const apiKey = await db.findApiKeyByUid(sub.apiKeyUid);
+      if (apiKey) {
+        const expired = isSubscriptionExpired(sub.endDate);
+        const daysRemaining = calculateDaysRemaining(sub.endDate);
+
+        resultSubscriptions.push({
+          id: sub.id,
+          apiKey: {
+            uid: apiKey.uid,
+            name: apiKey.name,
+            type: apiKey.type,
+            keyValue: apiKey.keyValue,
+          },
+          enabled: sub.enabled,
+          price: sub.price,
+          currency: sub.currency,
+          status: expired ? 'expired' : (daysRemaining <= days ? 'expiring' : 'active'),
+          startDate: sub.startDate,
+          endDate: sub.endDate,
+          renewalDate: sub.renewalDate,
+          autoRenew: sub.autoRenew,
+          daysRemaining: Math.max(0, daysRemaining),
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      subscriptions: resultSubscriptions.sort((a, b) => new Date(a.endDate) - new Date(b.endDate)),
+      summary: {
+        total: subscriptions.length,
+        active: subscriptions.filter(s => !isSubscriptionExpired(s.endDate)).length,
+        expired: subscriptions.filter(s => isSubscriptionExpired(s.endDate)).length,
+        expiring: subscriptions.filter(
+          s => !isSubscriptionExpired(s.endDate) && new Date(s.endDate) <= thresholdDate
+        ).length,
+      },
+    });
+  } catch (error) {
+    console.error('[Subscriptions] Error:', error);
+    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get('/api/admin/subscriptions/revenue', authenticateAdmin, async (req, res) => {
+  try {
+    const startDateStr = req.query.startDate;
+    const endDateStr = req.query.endDate;
+    const groupBy = req.query.groupBy || 'date';
+
+    const endDate = endDateStr ? new Date(endDateStr) : new Date();
+    const startDate = startDateStr ? new Date(startDateStr) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    const payments = await db.findAllPayments();
+    const filteredPayments = payments.filter(
+      p => p.status === 'completed' && new Date(p.paymentDate) >= startDate && new Date(p.paymentDate) <= endDate
+    );
+
+    const totalRevenue = filteredPayments.reduce((sum, p) => sum + p.amount, 0);
+
+    // Group payments
+    let groupedData = [];
+    if (groupBy === 'date') {
+      const dateGroups = new Map();
+      for (const payment of filteredPayments) {
+        const dateKey = payment.paymentDate.split('T')[0];
+        if (!dateGroups.has(dateKey)) {
+          dateGroups.set(dateKey, { count: 0, amount: 0, currency: payment.currency });
+        }
+        const group = dateGroups.get(dateKey);
+        group.count++;
+        group.amount += payment.amount;
+      }
+      groupedData = Array.from(dateGroups.entries())
+        .map(([date, data]) => ({ date, ...data }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+    }
+
+    // Get recent payments
+    const recentPayments = filteredPayments
+      .sort((a, b) => new Date(b.paymentDate) - new Date(a.paymentDate))
+      .slice(0, 10);
+
+    // Add apiKey names
+    const paymentsWithNames = await Promise.all(
+      recentPayments.map(async (payment) => {
+        const apiKey = await db.findApiKeyByUid(payment.apiKeyUid);
+        return {
+          id: payment.id,
+          amount: payment.amount,
+          currency: payment.currency,
+          paymentDate: payment.paymentDate,
+          reference: payment.reference,
+          method: payment.method,
+          apiKeyName: apiKey?.name || 'Unknown',
+        };
+      })
+    );
+
+    res.json({
+      success: true,
+      period: {
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString(),
+      },
+      summary: {
+        totalRevenue,
+        totalPayments: filteredPayments.length,
+        averagePaymentValue: filteredPayments.length > 0 ? totalRevenue / filteredPayments.length : 0,
+      },
+      groupedData,
+      recentPayments: paymentsWithNames,
+    });
+  } catch (error) {
+    console.error('[Revenue] Error:', error);
     res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
   }
 });
@@ -529,42 +807,41 @@ app.post('/api/admin/keys/:uid/subscription/renew', async (req, res) => {
 // STATS ENDPOINTS
 // ==========================================
 
-app.get('/api/admin/stats', async (req, res) => {
+app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
   try {
-    const authHeader = req.headers['authorization'];
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Token required', code: 'MISSING_TOKEN' });
-    }
+    const apiKeys = await db.findAllApiKeys();
+    const subscriptions = await db.findAllSubscriptions();
+    const payments = await db.findAllPayments();
+    const recentUsageLogs = await db.findRecentUsageLogs(24);
+    const recentAuditLogs = await db.findRecentAuditLogs(10);
 
-    const decoded = verifyToken(authHeader.substring(7));
-    if (!decoded || decoded.type !== 'admin') {
-      return res.status(401).json({ error: 'Invalid token', code: 'INVALID_TOKEN' });
-    }
+    const totalKeys = apiKeys.length;
+    const activeKeys = apiKeys.filter(k => k.isActive).length;
+    const adminKeys = apiKeys.filter(k => k.type === 'admin').length;
 
-    const totalKeys = await prisma.apiKey.count();
-    const activeKeys = await prisma.apiKey.count({ where: { isActive: true } });
-    const adminKeys = await prisma.apiKey.count({ where: { type: 'admin' } });
+    const activeSubscriptions = subscriptions.filter(s => !isSubscriptionExpired(s.endDate)).length;
+    const expiredSubscriptions = subscriptions.filter(s => isSubscriptionExpired(s.endDate)).length;
 
-    const allSubscriptions = await prisma.subscription.findMany({
-      where: { enabled: true },
-    });
-    const activeSubscriptions = allSubscriptions.filter((s) => !isSubscriptionExpired(s.endDate)).length;
-    const expiredSubscriptions = allSubscriptions.filter((s) => isSubscriptionExpired(s.endDate)).length;
+    const totalRevenue = payments.filter(p => p.status === 'completed').reduce((sum, p) => sum + p.amount, 0);
 
-    const allPayments = await prisma.paymentHistory.findMany({
-      where: { status: 'completed' },
-    });
-    const totalRevenue = allPayments.reduce((sum, p) => sum + p.amount, 0);
+    const requestsLast24h = recentUsageLogs.length;
 
-    const recentActivity = await prisma.auditLog.findMany({
-      orderBy: { createdAt: 'desc' },
-      take: 10,
-      include: { apiKey: { select: { name: true, type: true } } },
-    });
+    // Top keys
+    const topKeys = [...apiKeys]
+      .sort((a, b) => (b.usageCount || 0) - (a.usageCount || 0))
+      .slice(0, 10);
+
+    const recentActivity = recentAuditLogs.map(log => ({
+      id: log.id,
+      action: log.action,
+      createdAt: log.createdAt,
+      apiKeyName: log.apiKey?.name,
+      apiKeyType: log.apiKey?.type,
+    }));
 
     res.json({
       success: true,
-      timestamp: new Date(),
+      timestamp: new Date().toISOString(),
       overview: {
         totalKeys,
         activeKeys,
@@ -573,7 +850,7 @@ app.get('/api/admin/stats', async (req, res) => {
         normalKeys: totalKeys - adminKeys,
       },
       subscriptions: {
-        total: allSubscriptions.length,
+        total: subscriptions.length,
         active: activeSubscriptions,
         expired: expiredSubscriptions,
       },
@@ -581,13 +858,23 @@ app.get('/api/admin/stats', async (req, res) => {
         total: totalRevenue,
         last30Days: totalRevenue,
       },
-      recentActivity: recentActivity.map((log) => ({
-        id: log.id,
-        action: log.action,
-        createdAt: log.createdAt,
-        apiKeyName: log.apiKey?.name,
-        apiKeyType: log.apiKey?.type,
-      })),
+      usage: {
+        requestsLast24h,
+        averagePerHour: Math.round(requestsLast24h / 24),
+      },
+      topKeys: topKeys.map(key => {
+        const subscription = subscriptions.find(s => s.apiKeyUid === key.uid);
+        return {
+          uid: key.uid,
+          name: key.name,
+          type: key.type,
+          usageCount: key.usageCount || 0,
+          lastUsedAt: key.lastUsedAt,
+          hasSubscription: !!subscription,
+          isActive: key.isActive,
+        };
+      }),
+      recentActivity,
     });
   } catch (error) {
     console.error('[Stats] Error:', error);
@@ -615,38 +902,36 @@ app.get('/api/dashboard/apikeys', (req, res) => {
 app.post('/api/cron/maintenance', async (req, res) => {
   try {
     const authHeader = req.headers['authorization'];
-    const cronSecret = process.env.CRON_SECRET;
-
-    if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+    if (authHeader !== `Bearer ${db.CRON_SECRET}`) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
     // Check expired subscriptions
-    const expiredSubscriptions = await prisma.subscription.findMany({
-      where: {
-        enabled: true,
-        status: 'active',
-        endDate: { lt: new Date() },
-      },
-      include: { apiKey: true },
-    });
+    const subscriptions = await db.findAllSubscriptions();
+    const apiKeys = await db.findAllApiKeys();
+    let expiredCount = 0;
 
-    for (const sub of expiredSubscriptions) {
-      await prisma.subscription.update({
-        where: { id: sub.id },
-        data: { status: 'expired' },
-      });
-      await prisma.apiKey.update({
-        where: { id: sub.apiKeyId },
-        data: { isActive: false },
-      });
+    for (const sub of subscriptions) {
+      if (sub.enabled && sub.status === 'active' && isSubscriptionExpired(sub.endDate)) {
+        await db.updateSubscription(sub.apiKeyUid, { status: 'expired' });
+        
+        const apiKey = apiKeys.find(k => k.uid === sub.apiKeyUid);
+        if (apiKey) {
+          await db.updateApiKey(sub.apiKeyUid, { isActive: false });
+        }
+        expiredCount++;
+      }
     }
+
+    // Clean up blacklisted tokens
+    const cleanedTokens = await db.cleanupExpiredBlacklistedTokens();
 
     res.json({
       success: true,
-      timestamp: new Date(),
+      timestamp: new Date().toISOString(),
       results: {
-        expired: expiredSubscriptions.length,
+        expiredSubscriptions: expiredCount,
+        cleanedTokens,
       },
     });
   } catch (error) {
@@ -664,6 +949,7 @@ app.get('/api/health', (req, res) => {
     status: 'ok',
     uptime: process.uptime(),
     timestamp: new Date(),
+    database: 'json',
   });
 });
 
@@ -676,18 +962,17 @@ app.listen(PORT, () => {
   console.log(`📍 Server running on http://localhost:${PORT}`);
   console.log(`📊 Dashboard: http://localhost:${PORT}/api/dashboard/apikeys`);
   console.log(`🔑 Admin API Key: MutanoX3397`);
+  console.log(`📁 Database: JSON files in ./database`);
   console.log(`\nPress Ctrl+C to stop\n`);
 });
 
 // Graceful shutdown
-process.on('SIGTERM', async () => {
+process.on('SIGTERM', () => {
   console.log('SIGTERM signal received: closing HTTP server');
-  await prisma.$disconnect();
   process.exit(0);
 });
 
-process.on('SIGINT', async () => {
+process.on('SIGINT', () => {
   console.log('SIGINT signal received: closing HTTP server');
-  await prisma.$disconnect();
   process.exit(0);
 });

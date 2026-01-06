@@ -15,6 +15,7 @@ Sistema completo de gerenciamento de API Keys com recursos de assinatura e dashb
 - ✅ Estatísticas e relatórios em tempo real
 - ✅ Rastreamento de uso e logs de auditoria
 - ✅ Histórico de pagamentos
+- ✅ Banco de dados em arquivos JSON (sem necessidade de servidor de banco)
 
 ### Recursos de Segurança
 - 🔒 Autenticação JWT
@@ -33,11 +34,27 @@ Sistema completo de gerenciamento de API Keys com recursos de assinatura e dashb
 - 📜 Logs de atividade
 - ⚙️ Configuração do sistema
 
+## 🗄️ Banco de Dados
+
+O sistema usa **arquivos JSON** armazenados na pasta `database/`:
+- `api-keys.json` - Todas as API keys
+- `subscriptions.json` - Assinaturas ativas
+- `payments.json` - Histórico de pagamentos
+- `usage-logs.json` - Logs de uso
+- `audit-logs.json` - Logs de auditoria
+- `jwt-blacklist.json` - Tokens invalidados
+- `db-info.json` - Informações do banco
+
+**Vantagens:**
+- Sem necessidade de servidor de banco de dados
+- Fácil backup (basta copiar a pasta)
+- Versionamento nativo com Git
+- Deploy simplificado
+
 ## 🚀 Instalação
 
 ### Pré-requisitos
-- Node.js 18+ ou Bun
-- SQLite (incluso)
+- Bun ou Node.js 18+
 
 ### Passos de Instalação
 
@@ -48,31 +65,23 @@ npm install
 bun install
 ```
 
-2. **Configurar variáveis de ambiente**
+2. **Configurar variáveis de ambiente (opcional)**
 
-Copie `.env.example` para `.env` e configure:
+Crie um arquivo `.env` na raiz (opcional, já existem valores padrão):
 ```env
-DATABASE_URL="file:./db/api-keys.db"
-JWT_SECRET="your-secret-key-change-in-production"
-CRON_SECRET="your-cron-secret-here"
 PORT=3000
 ```
 
-3. **Inicializar o banco de dados**
-```bash
-npx prisma db push
-# ou
-bun run db:push
-```
+**Nota:** Não é necessário configurar `JWT_SECRET` ou `CRON_SECRET`, pois já estão embutidos no código.
 
-4. **Criar API Key admin (seeds)**
+3. **Criar API Key admin (seeds)**
 ```bash
-bun run seed.ts
+bun run seed
 ```
 
 **Importante:** A API key admin será `MutanoX3397`
 
-5. **Iniciar o servidor**
+4. **Iniciar o servidor**
 ```bash
 bun run dev
 # ou
@@ -101,7 +110,12 @@ Valida API key de admin e retorna token JWT.
   "valid": true,
   "token": "jwt_token_aqui",
   "refreshToken": "refresh_token_aqui",
-  "expiresIn": 3600
+  "expiresIn": 3600,
+  "apiKey": {
+    "uid": "...",
+    "name": "...",
+    "type": "admin"
+  }
 }
 ```
 
@@ -121,8 +135,6 @@ Cria nova API key.
 {
   "name": "Cliente X",
   "type": "normal",
-  "rateLimit": 1000,
-  "rateLimitWindow": 3600000,
   "subscription": {
     "enabled": true,
     "price": 50,
@@ -133,53 +145,26 @@ Cria nova API key.
 ```
 
 #### `GET /api/admin/keys`
-Lista todas as API keys com filtros.
+Lista todas as API keys.
 
-**Query Params:**
-- `status`: `active`, `inactive`, `all`
-- `type`: `admin`, `normal`, `all`
-- `hasSubscription`: `true`, `false`, `all`
-- `search`: Buscar por nome ou UID
-- `page`: Número da página (padrão: 1)
-- `limit`: Itens por página (padrão: 20)
-
-#### `GET /api/admin/keys/{keyOrUid}`
+#### `GET /api/admin/keys/{uid}`
 Obtém informações detalhadas da API key.
 
-#### `PUT /api/admin/keys/{keyOrUid}`
+#### `PUT /api/admin/keys/{uid}`
 Atualiza API key.
 
-#### `DELETE /api/admin/keys/{keyOrUid}`
+#### `DELETE /api/admin/keys/{uid}`
 Deleta API key.
 
 ### Gerenciamento de Assinaturas
 
-#### `POST /api/admin/keys/{keyOrUid}/subscription/activate`
+#### `POST /api/admin/keys/{uid}/subscription/activate`
 Ativa assinatura para API key.
 
-**Request:**
-```json
-{
-  "price": 50,
-  "durationDays": 30,
-  "autoRenew": false,
-  "currency": "BRL"
-}
-```
-
-#### `POST /api/admin/keys/{keyOrUid}/subscription/renew`
+#### `POST /api/admin/keys/{uid}/subscription/renew`
 Renova assinatura.
 
-**Request:**
-```json
-{
-  "durationDays": 30,
-  "paymentReference": "REF-123456",
-  "amount": 50
-}
-```
-
-#### `POST /api/admin/keys/{keyOrUid}/subscription/cancel`
+#### `POST /api/admin/keys/{uid}/subscription/cancel`
 Cancela assinatura (desativa renovação automática).
 
 ### Estatísticas e Relatórios
@@ -190,17 +175,8 @@ Obtém estatísticas gerais do sistema.
 #### `GET /api/admin/subscriptions/expiring`
 Lista assinaturas expirando em breve.
 
-**Query Params:**
-- `days`: Limite em dias (padrão: 7)
-- `status`: `expiring`, `expired`, `all`
-
 #### `GET /api/admin/subscriptions/revenue`
 Relatório de receita.
-
-**Query Params:**
-- `startDate`: Data ISO8601
-- `endDate`: Data ISO8601
-- `groupBy`: `date`, `month`, `key`
 
 ### Manutenção
 
@@ -262,9 +238,7 @@ Quando uma assinatura expira:
 Execute o endpoint de manutenção periodicamente:
 
 ```bash
-curl -X POST \
-  -H "Authorization: Bearer {CRON_SECRET}" \
-  http://localhost:3000/api/cron/maintenance
+curl -X POST http://localhost:3000/api/cron/maintenance
 ```
 
 ### O que a Manutenção Faz
@@ -275,36 +249,28 @@ curl -X POST \
    - Desativa API keys associadas
    - Cria logs de auditoria
 
-2. **Auto-Renovar Assinaturas**
-   - Encontra assinaturas expirando em 24h
-   - Estende pela duração padrão (30 dias)
-   - Cria registros de pagamento
-   - Cria logs de auditoria
-
-3. **Limpar Tokens Antigos**
+2. **Limpar Tokens Antigos**
    - Remove tokens expirados da blacklist
-   - Libera espaço no banco de dados
+   - Limpa arquivos JSON
 
 ## 📦 Estrutura do Projeto
 
 ```
 api-keys-system/
-├── admin/                    # API admin endpoints
-├── dashboard/                # Dashboard endpoint
-├── cron/                     # Maintenance endpoint
-├── api-keys/                 # API key utilities
-│   ├── jwt.ts               # JWT functions
-│   ├── maintenance.ts        # Maintenance tasks
-│   └── utils.ts             # Utility functions
-├── middleware/                # Middleware
-│   ├── auth.ts              # Authentication
-│   ├── rateLimit.ts         # Rate limiting
-│   └── security.ts         # Security headers
-├── dashboard.html            # Dashboard HTML
-├── schema.prisma            # Database schema
-├── seed.ts                 # Database seed
-├── .env.example            # Environment variables example
-└── README.md               # This file
+├── database/                  # Arquivos JSON do banco de dados
+│   ├── api-keys.json
+│   ├── subscriptions.json
+│   ├── payments.json
+│   ├── usage-logs.json
+│   ├── audit-logs.json
+│   ├── jwt-blacklist.json
+│   └── db-info.json
+├── index.ts                  # Servidor Express principal
+├── seed.ts                   # Script para criar API key admin
+├── dashboard.html             # Dashboard HTML completo
+├── package.json              # Dependências do projeto
+├── .env.example             # Exemplo de variáveis (opcional)
+└── README.md                # Este arquivo
 ```
 
 ## 🚨 Segurança
@@ -324,6 +290,83 @@ Todas as respostas incluem:
 - `X-XSS-Protection: 1; mode=block`
 - `Content-Security-Policy`
 - `Strict-Transport-Security`
+
+## 💾 Backup
+
+Para fazer backup do sistema:
+
+```bash
+# Copiar toda a pasta
+cp -r api-keys-system api-keys-system-backup-$(date +%Y%m%d)
+
+# Ou apenas o banco de dados
+tar -czf database-backup-$(date +%Y%m%d).tar.gz database/
+```
+
+## 📦 Deployment
+
+Para produção:
+
+1. **Copiar arquivos para o servidor**
+
+2. **Instalar dependências**
+```bash
+bun install
+```
+
+3. **Executar seed para criar admin key**
+```bash
+bun run seed
+```
+
+4. **Iniciar o servidor**
+```bash
+PORT=3000 bun start
+# ou
+NODE_ENV=production bun index.ts
+```
+
+5. **Configurar PM2 (opcional, para manter rodando)**
+```bash
+pm2 start index.ts --name "api-keys-system" --watch
+pm2 save
+pm2 startup
+```
+
+6. **Configurar cron job para manutenção**
+
+Adicionar ao crontab (roda diariamente à meia-noite):
+```
+0 0 * * * curl -X POST http://seu-dominio.com/api/cron/maintenance
+```
+
+## 🔄 Migrando de Prisma para JSON
+
+Se você já usava o sistema com Prisma:
+
+1. **Fazer backup dos dados existentes**
+
+2. **Remover arquivos do Prisma**
+```bash
+rm -rf prisma/
+rm schema.prisma
+```
+
+3. **Atualizar dependências**
+```bash
+bun install
+```
+
+4. **Criar nova estrutura**
+```bash
+mkdir -p database
+bun run seed
+```
+
+5. **Iniciar o novo sistema**
+```bash
+bun run dev
+```
 
 ## 🤝 Suporte
 

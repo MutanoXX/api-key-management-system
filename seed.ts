@@ -1,20 +1,17 @@
 /**
  * Seed script to initialize the database with an admin API key
- * Run with: bun run seed.ts
+ * Run with: bun run seed
  */
 
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import * as db from './database/db.js';
 
 async function seed() {
   console.log('🌱 Starting database seed...');
 
   try {
     // Check if admin key already exists
-    const existingAdminKey = await prisma.apiKey.findFirst({
-      where: { type: 'admin' },
-    });
+    const apiKeys = await db.findAllApiKeys();
+    const existingAdminKey = apiKeys.find(k => k.type === 'admin');
 
     if (existingAdminKey) {
       console.log('✅ Admin API key already exists');
@@ -23,18 +20,12 @@ async function seed() {
       return;
     }
 
-    // Generate UID
-    const uid = crypto.randomUUID();
-
-    // Create admin API key with the specified value
-    const adminKey = await prisma.apiKey.create({
-      data: {
-        uid: uid,
-        keyValue: 'MutanoX3397',
-        name: 'Admin Principal',
-        type: 'admin',
-        isActive: true,
-      },
+    // Create admin API key with specified value
+    const adminKey = await db.createApiKey({
+      keyValue: 'MutanoX3397',
+      name: 'Admin Principal',
+      type: 'admin',
+      isActive: true,
     });
 
     console.log('✅ Admin API key created successfully');
@@ -50,13 +41,11 @@ async function seed() {
 }
 
 seed()
-  .then(async () => {
+  .then(() => {
     console.log('✅ Seed completed successfully');
-    await prisma.$disconnect();
     process.exit(0);
   })
-  .catch(async (error) => {
+  .catch((error) => {
     console.error('❌ Seed failed:', error);
-    await prisma.$disconnect();
     process.exit(1);
   });

@@ -1,12 +1,7 @@
 # Dependencies
 node_modules/
 bun.lockb
-
-# Database
-*.db
-*.db-journal
-db/
-prisma/migrations/
+package-lock.json
 
 # Environment variables
 .env
@@ -33,3 +28,6 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Don't ignore the JSON database files
+# We want to track these in version control
