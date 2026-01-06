@@ -6,11 +6,6 @@ export const colors = {
   reset: '\x1b[0m',
   bright: '\x1b[1m',
   dim: '\x1b[2m',
-  underscore: '\x1b[4m',
-  blink: '\x1b[5m',
-  reverse: '\x1b[7m',
-  hidden: '\x1b[8m',
-
   fg: {
     black: '\x1b[30m',
     red: '\x1b[31m',
@@ -21,17 +16,6 @@ export const colors = {
     cyan: '\x1b[36m',
     white: '\x1b[37m',
     crimson: '\x1b[38m',
-  },
-
-  bg: {
-    black: '\x1b[40m',
-    red: '\x1b[41m',
-    green: '\x1b[42m',
-    yellow: '\x1b[43m',
-    blue: '\x1b[44m',
-    magenta: '\x1b[45m',
-    cyan: '\x1b[46m',
-    white: '\x1b[47m',
   },
 };
 
@@ -56,20 +40,20 @@ export class Logger {
   getTimestamp() {
     const now = new Date();
     const timestamp = now.toISOString();
-    return `${colors.dim}${timestamp}${colors.reset}`;
+    return colors.dim + timestamp + colors.reset;
   }
 
   format(level, category, message, data = null) {
     const { symbol, color } = LogLevels[level] || LogLevels.INFO;
     const timestamp = this.getTimestamp();
 
-    let logMessage = `${timestamp} ${color}${symbol} ${colors.bright}[${category}]${colors.reset} ${message}`;
+    let logMessage = timestamp + ' ' + color + symbol + ' ' + colors.bright + '[' + category + ']' + colors.reset + ' ' + message;
 
     if (data) {
       const dataStr = typeof data === 'object' ? JSON.stringify(data, null, 2) : String(data);
-      logMessage += `\n${colors.dim}┌──────────────────────────────────────${colors.reset}\n`;
-      logMessage += `${colors.dim}│${colors.reset} ${dataStr}\n`;
-      logMessage += `${colors.dim}└──────────────────────────────────────${colors.reset}`;
+      logMessage += '\n' + colors.dim + '┌──────────────────────────────────────' + colors.reset;
+      logMessage += '\n' + colors.dim + '│' + colors.reset + ' ' + dataStr;
+      logMessage += '\n' + colors.dim + '└──────────────────────────────────────' + colors.reset;
     }
 
     return logMessage;
@@ -104,33 +88,33 @@ export class Logger {
                       colors.fg.red;
 
     console.log(
-      `${timestamp} ${colors.fg.blue}🌐 ${colors.bright}[API]${colors.reset} ` +
-      `${colors.fg.cyan}${method}${colors.reset} ${endpoint} → ` +
-      `${statusColor}${status}${colors.reset} (${colors.dim}${duration}ms${colors.reset})`
+      timestamp + ' ' + colors.fg.blue + '🌐 ' + colors.bright + '[API]' + colors.reset + ' ' +
+      colors.fg.cyan + method + colors.reset + ' ' + endpoint + ' → ' +
+      statusColor + status + colors.reset + ' (' + colors.dim + duration + 'ms' + colors.reset + ')'
     );
   }
 
   auth(action, details) {
     const timestamp = this.getTimestamp();
     console.log(
-      `${timestamp} ${colors.fg.crimson}🔐 ${colors.bright}[AUTH]${colors.reset} ` +
-      `${colors.fg.yellow}${action}${colors.reset} ${details}`
+      timestamp + ' ' + colors.fg.crimson + '🔐 ' + colors.bright + '[AUTH]' + colors.reset + ' ' +
+      colors.fg.yellow + action + colors.reset + ' ' + details
     );
   }
 
   db(operation, details) {
     const timestamp = this.getTimestamp();
     console.log(
-      `${timestamp} ${colors.fg.magenta}💾 ${colors.bright}[DB]${colors.reset} ` +
-      `${operation} ${details}`
+      timestamp + ' ' + colors.fg.magenta + '💾 ' + colors.bright + '[DB]' + colors.reset + ' ' +
+      operation + ' ' + details
     );
   }
 
   security(event, details) {
     const timestamp = this.getTimestamp();
     console.log(
-      `${timestamp} ${colors.fg.red}🛡️ ${colors.bright}[SECURITY]${colors.reset} ` +
-      `${colors.fg.yellow}${event}${colors.reset} ${details}`
+      timestamp + ' ' + colors.fg.red + '🛡️ ' + colors.bright + '[SECURITY]' + colors.reset + ' ' +
+      colors.fg.yellow + event + colors.reset + ' ' + details
     );
   }
 
@@ -143,8 +127,8 @@ export class Logger {
                       colors.fg.cyan;
 
     console.log(
-      `${timestamp} ${colors.fg.cyan}➡️  ${colors.bright}[REQUEST]${colors.reset} ` +
-      `${methodColor}${req.method}${colors.reset} ${colors.dim}${req.path}${colors.reset}`
+      timestamp + ' ' + colors.fg.cyan + '➡️  ' + colors.bright + '[REQUEST]' + colors.reset + ' ' +
+      methodColor + req.method + colors.reset + ' ' + colors.dim + req.path + colors.reset
     );
   }
 
@@ -156,8 +140,8 @@ export class Logger {
                       colors.fg.red;
 
     console.log(
-      `${timestamp} ${colors.fg.cyan}⬅️  ${colors.bright}[RESPONSE]${colors.reset} ` +
-      `${statusColor}${res.statusCode}${colors.reset} ${colors.dim}(${duration}ms)${colors.reset}`
+      timestamp + ' ' + colors.fg.cyan + '⬅️  ' + colors.bright + '[RESPONSE]' + colors.reset + ' ' +
+      statusColor + res.statusCode + colors.reset + ' ' + colors.dim + '(' + duration + 'ms)' + colors.reset
     );
   }
 
@@ -171,27 +155,27 @@ export class Logger {
 
     console.log('');
     this.separator('═', bannerWidth);
-    console.log(`${colors.fg.blue}╔${'═'.repeat(bannerWidth - 2)}╗${colors.reset}`);
-    console.log(`${colors.fg.blue}║${colors.reset} ${colors.bright}${colors.fg.cyan}${title}${colors.reset}${padding} ${colors.fg.blue}║${colors.reset}`);
+    console.log(colors.fg.blue + '╔' + '═'.repeat(bannerWidth - 2) + '╗' + colors.reset);
+    console.log(colors.fg.blue + '║' + colors.reset + ' ' + colors.bright + colors.fg.cyan + title + colors.reset + padding + ' ' + colors.fg.blue + '║' + colors.reset);
 
     if (subtitle) {
       const subtitlePadding = ' '.repeat(Math.max(0, Math.floor((bannerWidth - subtitle.length - 4) / 2)));
-      console.log(`${colors.fg.blue}║${colors.reset} ${colors.dim}${subtitle}${subtitlePadding} ${colors.fg.blue}║${colors.reset}`);
+      console.log(colors.fg.blue + '║' + colors.reset + ' ' + colors.dim + subtitle + subtitlePadding + ' ' + colors.fg.blue + '║' + colors.reset);
     }
 
     if (version) {
       const versionPadding = ' '.repeat(Math.max(0, Math.floor((bannerWidth - version.length - 4) / 2)));
-      console.log(`${colors.fg.blue}║${colors.reset} ${colors.dim}v${version}${versionPadding} ${colors.fg.blue}║${colors.reset}`);
+      console.log(colors.fg.blue + '║' + colors.reset + ' ' + colors.dim + 'v' + version + versionPadding + ' ' + colors.fg.blue + '║' + colors.reset);
     }
 
-    console.log(`${colors.fg.blue}╚${'═'.repeat(bannerWidth - 2)}╝${colors.reset}`);
+    console.log(colors.fg.blue + '╚' + '═'.repeat(bannerWidth - 2) + '╝' + colors.reset);
     this.separator('═', bannerWidth);
     console.log('');
   }
 
   section(title) {
     console.log('');
-    console.log(`${colors.fg.blue}▶ ${colors.bright}${title}${colors.reset}`);
+    console.log(colors.fg.blue + '▶ ' + colors.bright + title + colors.reset);
     this.separator('─', 40);
   }
 
@@ -199,44 +183,20 @@ export class Logger {
     items.forEach((item, index) => {
       if (typeof item === 'object') {
         const [key, value] = Object.entries(item)[0];
-        console.log(`${itemPrefix}${colors.fg.cyan}${key}${colors.reset}: ${value}`);
+        console.log(itemPrefix + colors.fg.cyan + key + colors.reset + ': ' + value);
       } else {
-        console.log(`${itemPrefix}${item}`);
+        console.log(itemPrefix + item);
       }
     });
   }
 
   table(headers, rows) {
-    const columnWidths = headers.map(h => Math.max(h.length, ...rows.map(r => String(r[headers.indexOf(h)]).length)));
-
     console.log('');
 
-    // Header
-    let headerRow = '┌';
-    columnWidths.forEach(w => headerRow += '─'.repeat(w + 2) + '┬');
-    headerRow = headerRow.slice(0, -1) + '┐';
-    console.log(colors.dim + headerRow + colors.reset);
-
-    const headerCells = headers.map((h, i) => ` ${colors.bright}${h}${colors.reset} `.padEnd(columnWidths[i] + 1));
-    console.log(colors.dim + '│' + colors.reset + headerCells.join(colors.dim + '│' + colors.reset) + colors.dim + '│' + colors.reset);
-
-    // Separator
-    let separatorRow = '├';
-    columnWidths.forEach(w => separatorRow += '─'.repeat(w + 2) + '┼');
-    separatorRow = separatorRow.slice(0, -1) + '┤';
-    console.log(colors.dim + separatorRow + colors.reset);
-
-    // Data rows
-    rows.forEach(row => {
-      const cells = row.map((cell, i) => ` ${cell} `.padEnd(columnWidths[i] + 1));
-      console.log(colors.dim + '│' + colors.reset + cells.join(colors.dim + '│' + colors.reset) + colors.dim + '│' + colors.reset);
+    headers.forEach((header, i) => {
+      console.log('  ' + colors.fg.cyan + header + ':' + colors.reset + ' ' + (rows[0] ? rows[0][header] : 'N/A'));
     });
 
-    // Footer
-    let footerRow = '└';
-    columnWidths.forEach(w => footerRow += '─'.repeat(w + 2) + '┴');
-    footerRow = footerRow.slice(0, -1) + '┘';
-    console.log(colors.dim + footerRow + colors.reset);
     console.log('');
   }
 }
