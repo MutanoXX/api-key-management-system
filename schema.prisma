@@ -1,0 +1,112 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Post {
+  id        String   @id @default(cuid())
+  title     String
+  content   String?
+  published Boolean  @default(false)
+  authorId  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// API Key Management System
+model ApiKey {
+  id              String   @id @default(cuid())
+  uid             String   @unique
+  keyValue        String   @unique
+  name            String
+  type            String   @default("normal") // "admin" or "normal"
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  rateLimit       Int?     // requests per window
+  rateLimitWindow Int?     // window in milliseconds
+  lastUsedAt      DateTime?
+  usageCount      Int      @default(0)
+  subscription    Subscription?
+  usageLogs       UsageLog[]
+  auditLogs       AuditLog[]
+}
+
+model Subscription {
+  id              String   @id @default(cuid())
+  apiKeyId        String   @unique
+  apiKey          ApiKey   @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  enabled         Boolean  @default(false)
+  price           Float
+  currency        String   @default("BRL")
+  status          String   @default("pending") // "active", "expired", "cancelled", "pending"
+  startDate       DateTime
+  endDate         DateTime
+  renewalDate     DateTime?
+  autoRenew       Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  paymentHistory  PaymentHistory[]
+}
+
+model PaymentHistory {
+  id              String       @id @default(cuid())
+  subscriptionId  String
+  subscription    Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  amount          Float
+  currency        String       @default("BRL")
+  paymentDate     DateTime     @default(now())
+  reference       String?
+  method          String?      // "credit_card", "pix", "bank_transfer", etc.
+  status          String       @default("completed") // "pending", "completed", "failed", "refunded"
+  createdAt       DateTime     @default(now())
+}
+
+model UsageLog {
+  id          String   @id @default(cuid())
+  apiKeyId    String
+  apiKey      ApiKey   @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  endpoint    String
+  method      String
+  ipAddress   String?
+  userAgent   String?
+  responseStatus Int?
+  duration    Int?     // in milliseconds
+  createdAt   DateTime @default(now())
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  apiKeyId    String?
+  apiKey      ApiKey?  @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+  action      String
+  details     String?  // JSON string
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+}
+
+model JwtBlacklist {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
